@@ -19,19 +19,17 @@ if not exist "%PY_FILE%" (
     echo.
     echo  [Error] Script not found: %PY_FILE%
     echo.
-    pause
-    exit /b 1
+    goto :EXIT
 )
 
-set "PYTHON=C:\Users\Administrator\.workbuddy\binaries\python\versions\3.13.12\python.exe"
+set "PYTHON=C:\Users\Administrator\.workbuddy\binaries\python\envs\pdfsig\Scripts\python.exe"
 
 if not exist "%PYTHON%" (
     color 0C
     echo.
     echo  [Error] Python runtime not found: %PYTHON%
     echo.
-    pause
-    exit /b 1
+    goto :EXIT
 )
 
 REM Build args inside if block, but call Python OUTSIDE (stdin works normally)
@@ -59,11 +57,13 @@ if not "%~1"=="" (
 set "RET=!ERRORLEVEL!"
 echo.
 if "!RET!"=="0" (
-    echo [Success] Processing completed.
+    powershell -NoProfile -Command "Write-Host '[Success] Processing completed.'"
 ) else (
     color 0C
-    echo [Error] Processing finished with errors. Please check logs above.
+    powershell -NoProfile -Command "Write-Host '[Error] Processing finished with errors. Please check logs above.'"
 )
+
+:EXIT
 echo.
-pause
-exit /b !RET!
+powershell -NoProfile -Command "$r = Read-Host 'Press [Y] to run again, or [Enter] to exit'; if ($r -eq 'y' -or $r -eq 'yes') { Start-Process -FilePath '%~f0' }"
+exit
