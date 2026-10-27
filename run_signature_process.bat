@@ -1,13 +1,13 @@
 @echo off
 chcp 65001 >nul 2>&1
-title PDF Signature Page Processing v1.0.0
+title PDF Signature Page Processing v1.1.0
 setlocal EnableDelayedExpansion
 set "PYTHONDONTWRITEBYTECODE=1"
 color 0F
 
 echo.
 echo ===================================================
-echo PDF Signature Page Processing v1.0.0
+echo PDF Signature Page Processing v1.1.0
 echo ===================================================
 echo.
 

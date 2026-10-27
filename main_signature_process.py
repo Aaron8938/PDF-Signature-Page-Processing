@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 PDF Signature Page Processing
-Scan PDF for pages containing digital signatures,
-render signature pages as images and rebuild.
-Output saved with "_签章页处理后" suffix next to source.
+1) Scan PDF for pages containing digital signature widgets,
+   render those pages as images and rebuild the document.
+2) If no signature widget is found but the file is permission-locked
+   (modify / copy denied), remove the lock losslessly.
+Output saved with "_处理后" suffix next to source.
 """
 
 import argparse
@@ -13,14 +15,11 @@ import sys
 import tempfile
 
 import fitz  # PyMuPDF
-from PIL import Image
 
-VERSION = "v1.0.0"
+VERSION = "v1.1.0"
 
 EMBED_DPI = 200
 JPEG_QUALITY = 92
-
-_LANCZOS = getattr(Image, "LANCZOS", getattr(Image, "ANTIALIAS", None))
 
 
 def sep():
@@ -40,63 +39,84 @@ def find_sig_pages(doc) -> list:
     return sig_pages
 
 
-def process_pdf(pdf_path: str) -> str:
-    """
-    Process PDF: render signature pages as images.
-    Returns the output path, or None if no signature pages found.
-    """
-    doc = fitz.open(pdf_path)
-    sig_pages = find_sig_pages(doc)
-    total = len(doc)
+def is_restricted(doc) -> bool:
+    """True if modify or copy permission is denied (unrestricted files report -4)."""
+    perms = doc.permissions
+    return (perms & fitz.PDF_PERM_MODIFY) == 0 or (perms & fitz.PDF_PERM_COPY) == 0
 
-    if not sig_pages:
-        print("  [Info] No signature pages detected. No processing needed.")
-        doc.close()
-        return None
 
-    print("  Total pages: %d, signature pages: %d" % (total, len(sig_pages)))
-    print("  Signature page(s): %s" % [p + 1 for p in sig_pages])
-
-    out_doc = fitz.open()
-    mat = fitz.Matrix(EMBED_DPI / 72, EMBED_DPI / 72)
-    flatten_set = set(sig_pages)
-
-    for i in range(total):
-        page = doc[i]
-        if i in flatten_set:
-            pix = page.get_pixmap(matrix=mat, alpha=False)
-            src_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            a4_px_w = pix.width
-            a4_px_h = pix.height
-
-            tmp_path = None
-            try:
-                fd, tmp_path = tempfile.mkstemp(suffix=".png")
-                os.close(fd)
-                src_img.save(tmp_path, "PNG")
-                new_page = out_doc.new_page(width=page.rect.width, height=page.rect.height)
-                new_page.insert_image(page.rect, filename=tmp_path)
-            finally:
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.remove(tmp_path)
-                    except Exception:
-                        pass
-
-            print("  [OK] Page %d/%d: signature page -> image" % (i + 1, total))
-        else:
-            out_doc.insert_pdf(doc, from_page=i, to_page=i)
-
+def out_path_of(pdf_path: str) -> str:
     out_dir = os.path.dirname(pdf_path)
     base, ext = os.path.splitext(os.path.basename(pdf_path))
-    out_name = "%s_签章页处理后%s" % (base, ext)
-    out_path = os.path.join(out_dir, out_name)
+    return os.path.join(out_dir, "%s_处理后%s" % (base, ext))
 
-    out_doc.save(out_path, deflate=True, garbage=4)
-    out_doc.close()
+
+def process_pdf(pdf_path: str):
+    """
+    Process PDF. Returns (output_path, mode); output_path is None when nothing to do.
+    mode: "sign"   -> signature pages rendered as images
+          "unlock" -> permission lock removed, page content untouched
+    """
+    doc = fitz.open(pdf_path)
+
+    if doc.needs_pass:
+        doc.close()
+        raise RuntimeError("open password required")
+
+    total = len(doc)
+    sig_pages = find_sig_pages(doc)
+    restricted = is_restricted(doc)
+
+    if not sig_pages and not restricted:
+        print("  [Info] No signature widget, no permission lock. No processing needed.")
+        doc.close()
+        return None, None
+
+    out_path = out_path_of(pdf_path)
+
+    # Case 1: signature widget found -> rasterize those pages
+    if sig_pages:
+        print("  Total pages: %d, signature pages: %d" % (total, len(sig_pages)))
+        print("  Signature page(s): %s" % [p + 1 for p in sig_pages])
+
+        out_doc = fitz.open()
+        mat = fitz.Matrix(EMBED_DPI / 72, EMBED_DPI / 72)
+        flatten_set = set(sig_pages)
+
+        for i in range(total):
+            page = doc[i]
+            if i in flatten_set:
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+
+                tmp_path = None
+                try:
+                    fd, tmp_path = tempfile.mkstemp(suffix=".png")
+                    os.close(fd)
+                    pix.save(tmp_path)
+                    new_page = out_doc.new_page(width=page.rect.width, height=page.rect.height)
+                    new_page.insert_image(page.rect, filename=tmp_path)
+                finally:
+                    if tmp_path and os.path.exists(tmp_path):
+                        try:
+                            os.remove(tmp_path)
+                        except Exception:
+                            pass
+
+                print("  [OK] Page %d/%d: signature page -> image" % (i + 1, total))
+            else:
+                out_doc.insert_pdf(doc, from_page=i, to_page=i)
+
+        out_doc.save(out_path, deflate=True, garbage=4)
+        out_doc.close()
+        doc.close()
+        return out_path, "sign"
+
+    # Case 2: no signature widget, but permission locked -> drop the lock only
+    print("  Total pages: %d, no signature widget." % total)
+    print("  [Info] Permission lock detected (modify/copy denied), removing lock only.")
+    doc.save(out_path, encryption=fitz.PDF_ENCRYPT_NONE, deflate=True, garbage=4)
     doc.close()
-
-    return out_path
+    return out_path, "unlock"
 
 
 def parse_args():
@@ -119,11 +139,12 @@ def run_one(pdf_path):
         return 2
 
     try:
-        output_path = process_pdf(pdf_path)
+        output_path, mode = process_pdf(pdf_path)
         if output_path is None:
             return 1
         out_size = os.path.getsize(output_path) / 1024 / 1024
-        print("  Output: %s  (%.2f MB)" % (os.path.basename(output_path), out_size))
+        action = "signature pages flattened" if mode == "sign" else "permission lock removed"
+        print("  Output: %s  (%.2f MB)  [%s]" % (os.path.basename(output_path), out_size, action))
         return 0
     except Exception as e:
         print("  [FAIL] %s  %s" % (basename, str(e)))
